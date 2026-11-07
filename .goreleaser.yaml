@@ -1,0 +1,12 @@
+version: 2
+builds:
+  - main: ./cmd/whatsrunning
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{.Version}}"]
+archives:
+  - name_template: "whatsrunning_{{ .Os }}_{{ .Arch }}"
+checksum:
+  name_template: checksums.txt
