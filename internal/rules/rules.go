@@ -113,6 +113,9 @@ func Evaluate(g *graph.Graph) []Finding {
 	fs := []Finding{}
 	for _, n := range g.Nodes {
 		add := func(rule string, sev Severity, title, why, fix string) {
+			if n.Server != "" {
+				title = n.Server + ": " + title
+			}
 			fs = append(fs, Finding{rule, sev, n.ID, title, why, fix})
 		}
 		switch n.Kind {
@@ -132,6 +135,8 @@ func Evaluate(g *graph.Graph) []Finding {
 		case graph.KindContainer:
 			checkExposedStore(g, n, add)
 			checkContainer(g, n, add)
+		case graph.KindDomain:
+			checkDomain(g, n, add)
 		}
 	}
 	sort.SliceStable(fs, func(i, j int) bool {
@@ -228,6 +233,35 @@ func checkContainer(g *graph.Graph, n *graph.Node, add addFunc) {
 		add("runs-as-root", Low, n.Name+" runs as root",
 			"A vulnerability in a root process gives an attacker more power inside the container and makes escapes easier.",
 			"Set a non-root user, e.g. user: \"1000:1000\", if the image supports it.")
+	}
+}
+
+func checkDomain(g *graph.Graph, n *graph.Node, add addFunc) {
+	switch {
+	case n.Attrs["tls"] != "true" && n.Attrs["plain_http_serves"] == "true":
+		add("plain-http-site", Medium, n.Name+" is served over plain HTTP",
+			"Logins, cookies and data sent to this site travel unencrypted and can be read or changed on the way.",
+			"Add a TLS certificate (e.g. Let's Encrypt with certbot) and redirect port 80 to https.")
+	case n.Attrs["plain_http_serves"] == "true":
+		add("http-without-redirect", Low, n.Name+" also answers on plain HTTP without redirecting",
+			"Visitors who type the address without https stay on an unencrypted connection.",
+			"In the port 80 server block, use: return 301 https://$host$request_uri;")
+	}
+	for _, e := range g.Edges {
+		if e.From != n.ID || e.Kind != graph.EdgeRoutes {
+			continue
+		}
+		target := g.Node(e.To)
+		if pub := publicPorts(g, e.To); target != nil && len(pub) > 0 && target.Name != n.Attrs["served_by"] {
+			add("proxy-bypass", High, fmt.Sprintf("%s is reachable directly on port %s, bypassing nginx for %s", target.Name, strings.Join(pub, ", "), n.Name),
+				"Anything nginx enforces (TLS, authentication, rate limits, IP allow lists) can be skipped by going straight to the port.",
+				"Stop publishing the port: nginx reaches the service over the internal network or localhost.")
+		}
+	}
+	for _, u := range n.Lists["unresolved"] {
+		add("dead-route", Low, n.Name+" routes "+u+", where nothing is running",
+			"Requests to this path fail with 502 Bad Gateway, and a forgotten route can expose whatever starts on that address later.",
+			"Remove the location block, or start the service it should reach.")
 	}
 }
 

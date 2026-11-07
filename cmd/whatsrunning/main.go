@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/RavaliMeka/whatsrunning/internal/collector/ports"
 	"github.com/RavaliMeka/whatsrunning/internal/demo"
 	"github.com/RavaliMeka/whatsrunning/internal/graph"
+	"github.com/RavaliMeka/whatsrunning/internal/remote"
 	"github.com/RavaliMeka/whatsrunning/internal/render"
 	"github.com/RavaliMeka/whatsrunning/internal/rules"
 	"github.com/RavaliMeka/whatsrunning/internal/scan"
@@ -38,8 +40,12 @@ Flags:
   -no-ports            skip host listening ports
   -v                   also print low-severity findings
   -fail-on SEVERITY    exit 2 if any finding is at least SEVERITY (critical|high|medium|low)
+  -ssh TARGET          scan a server over ssh (user@host or an ssh_config alias); repeatable
+  -ssh-sudo            run remote scans with sudo -n
+  -local               with -ssh, also scan this machine
 
-Runs locally and sends nothing anywhere. Environment variable values are never recorded.
+Local scans send nothing anywhere. With -ssh, this binary is copied to a private
+temporary file on each server, run, and deleted. Environment variable values are never recorded.
 `
 
 func main() {
@@ -71,6 +77,10 @@ func run(args []string) (int, error) {
 	noPorts := fs.Bool("no-ports", false, "")
 	verbose := fs.Bool("v", false, "")
 	failOn := fs.String("fail-on", "", "")
+	var targets []string
+	fs.Func("ssh", "", func(t string) error { targets = append(targets, t); return nil })
+	sshSudo := fs.Bool("ssh-sudo", false, "")
+	local := fs.Bool("local", false, "")
 	if err := fs.Parse(args); errors.Is(err, flag.ErrHelp) {
 		return 0, nil
 	} else if err != nil {
@@ -91,9 +101,16 @@ func run(args []string) (int, error) {
 		if !*noPorts {
 			cs = append(cs, ports.New())
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		g = scan.Run(ctx, cs)
+		if len(targets) == 0 {
+			g = scan.Run(ctx, cs)
+		} else {
+			var err error
+			if g, err = scanServers(ctx, targets, *sshSudo, *local, cs); err != nil {
+				return 1, err
+			}
+		}
 	}
 	rep := render.Report{Graph: g, Findings: rules.Evaluate(g)}
 
@@ -128,6 +145,54 @@ func run(args []string) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+// scanServers scans each ssh target in parallel and merges them into one map.
+// A failed server becomes a warning, unless every server failed.
+func scanServers(ctx context.Context, targets []string, sudo, local bool, cs []collector.Collector) (*graph.Graph, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	parts := make([]scan.Part, len(targets))
+	errs := make([]error, len(targets))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i, t := range targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			fmt.Fprintf(os.Stderr, "  scanning %s over ssh\n", t)
+			g, err := remote.Scan(ctx, t, remote.Options{Self: self, Sudo: sudo})
+			parts[i], errs[i] = scan.Part{Target: t, Graph: g}, err
+		}()
+	}
+	var mine *graph.Graph
+	if local {
+		mine = scan.Run(ctx, cs)
+	}
+	wg.Wait()
+
+	var ok []scan.Part
+	if mine != nil {
+		ok = append(ok, scan.Part{Target: "local", Graph: mine})
+	}
+	var warnings []string
+	for i, p := range parts {
+		if errs[i] != nil {
+			warnings = append(warnings, errs[i].Error())
+			continue
+		}
+		ok = append(ok, p)
+	}
+	if len(ok) == 0 {
+		return nil, errors.Join(errs...)
+	}
+	g := scan.Combine(ok)
+	g.Warnings = append(g.Warnings, warnings...)
+	return g, nil
 }
 
 // writeFile creates the report readable by its owner only and refuses to follow

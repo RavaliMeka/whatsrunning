@@ -72,11 +72,15 @@ func Terminal(w io.Writer, r Report, color, verbose bool) {
 		}
 	}
 	for _, e := range g.Edges {
-		if e.Public {
+		if n := g.Node(e.To); e.Public && n != nil && n.Kind != graph.KindDomain {
 			public++
 		}
 	}
-	fmt.Fprintf(w, "\n%s  %s\n", c("1", "whatsrunning"), c("2", g.Host.Hostname+" · "+g.Host.OS))
+	where := g.Host.Hostname
+	if g.Host.OS != "" {
+		where += " · " + g.Host.OS
+	}
+	fmt.Fprintf(w, "\n%s  %s\n", c("1", "whatsrunning"), c("2", where))
 	fmt.Fprintf(w, "  %d containers (%d running) · %d host services · %d volumes · %d public ports\n\n",
 		count[graph.KindContainer], running, count[graph.KindProcess], count[graph.KindVolume], public)
 

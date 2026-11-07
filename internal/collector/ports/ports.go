@@ -3,7 +3,6 @@
 package ports
 
 import (
-	"bufio"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -29,10 +28,11 @@ func (c *Collector) Available() bool {
 	return err == nil
 }
 
-type listener struct {
-	ip    net.IP
-	port  int
-	inode string
+type socket struct {
+	ip, rip     net.IP
+	port, rport int
+	listen      bool
+	inode       string
 }
 
 type proc struct {
@@ -44,23 +44,19 @@ type proc struct {
 
 func (c *Collector) Collect(context.Context) (*graph.Graph, error) {
 	g := graph.New()
-	var ls []listener
-	for _, f := range []string{"net/tcp", "net/tcp6"} {
-		l, err := readListeners(filepath.Join(c.proc, f))
-		if err != nil && !os.IsNotExist(err) {
-			g.Warnings = append(g.Warnings, err.Error())
-		}
-		ls = append(ls, l...)
+	socks, err := readSockets(filepath.Join(c.proc, "net"))
+	if err != nil {
+		g.Warnings = append(g.Warnings, err.Error())
 	}
 	owners, complete := c.socketOwners()
 	if !complete {
 		g.Warnings = append(g.Warnings, "ports: some processes were not readable; run as root to name them all")
 	}
 
-	for _, l := range ls {
+	for _, l := range socks {
 		p := owners[l.inode]
-		if p != nil && p.comm == "docker-proxy" {
-			continue // already represented by the container it forwards to
+		if !l.listen || (p != nil && p.comm == "docker-proxy") {
+			continue // docker-proxy is represented by the container it forwards to
 		}
 		id, name := fmt.Sprintf("proc:unknown:%d", l.port), fmt.Sprintf("unknown process (:%d)", l.port)
 		if p != nil {
@@ -87,28 +83,80 @@ func (c *Collector) Collect(context.Context) (*graph.Graph, error) {
 		}
 		g.Expose(id, l.port, !l.ip.IsLoopback(), addr)
 	}
+
+	// Outbound connections of the services found above become observed links.
+	for _, s := range outbound(socks) {
+		if p := owners[s.inode]; p != nil {
+			if n := g.Node("proc:" + p.comm); n != nil {
+				addConnect(n, s)
+			}
+		}
+	}
 	return g, nil
 }
 
-func readListeners(path string) ([]listener, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+// Outbound lists "ip:port" peers of established connections that this network
+// namespace opened (not inbound ones to its own listeners). dir is a /proc/<pid>/net path.
+func Outbound(dir string) []string {
+	socks, _ := readSockets(dir)
+	n := &graph.Node{Lists: map[string][]string{}}
+	for _, s := range outbound(socks) {
+		addConnect(n, s)
 	}
-	defer f.Close()
-	var out []listener
-	sc := bufio.NewScanner(f)
-	sc.Scan() // header
-	for sc.Scan() {
-		fs := strings.Fields(sc.Text())
-		if len(fs) < 10 || fs[3] != "0A" { // 0A = LISTEN
+	return n.Lists["connects"]
+}
+
+func outbound(socks []socket) []socket {
+	listening := map[int]bool{}
+	for _, s := range socks {
+		if s.listen {
+			listening[s.port] = true
+		}
+	}
+	var out []socket
+	for _, s := range socks {
+		if !s.listen && s.rip != nil && !s.rip.IsLoopback() && !listening[s.port] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func addConnect(n *graph.Node, s socket) {
+	if peer := net.JoinHostPort(s.rip.String(), strconv.Itoa(s.rport)); !slices.Contains(n.Lists["connects"], peer) {
+		n.Lists["connects"] = append(n.Lists["connects"], peer)
+	}
+}
+
+// readSockets parses tcp and tcp6 in a /proc net directory, keeping
+// listening (0A) and established (01) sockets.
+func readSockets(dir string) ([]socket, error) {
+	var out []socket
+	for _, name := range []string{"tcp", "tcp6"} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if os.IsNotExist(err) {
 			continue
+		} else if err != nil {
+			return out, err
 		}
-		if ip, port, err := parseAddr(fs[1]); err == nil {
-			out = append(out, listener{ip, port, fs[9]})
+		lines := strings.Split(string(b), "\n")
+		for _, line := range lines[min(1, len(lines)):] { // skip the header
+			fs := strings.Fields(line)
+			if len(fs) < 10 || (fs[3] != "0A" && fs[3] != "01") {
+				continue
+			}
+			ip, port, err1 := parseAddr(fs[1])
+			rip, rport, err2 := parseAddr(fs[2])
+			if err1 == nil && err2 == nil {
+				s := socket{ip: ip, port: port, listen: fs[3] == "0A", inode: fs[9]}
+				if !s.listen {
+					s.rip, s.rport = rip, rport
+				}
+				out = append(out, s)
+			}
 		}
 	}
-	return out, sc.Err()
+	return out, nil
 }
 
 // parseAddr decodes "0100007F:0035". The kernel prints each 32-bit word of the

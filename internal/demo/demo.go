@@ -1,5 +1,5 @@
-// Package demo builds a sample server with typical problems, for `whatsrunning demo`
-// and the hosted live demo.
+// Package demo builds two sample servers with typical problems, for
+// `whatsrunning demo` and the hosted live demo.
 package demo
 
 import (
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/RavaliMeka/whatsrunning/internal/graph"
+	"github.com/RavaliMeka/whatsrunning/internal/scan"
 )
 
 type ctr struct {
@@ -40,8 +41,12 @@ var containers = []ctr{
 }
 
 func Graph() *graph.Graph {
+	return scan.Combine([]scan.Part{{Target: "prod-web-01", Graph: web()}, {Target: "prod-db-01", Graph: db()}})
+}
+
+func web() *graph.Graph {
 	g := graph.New()
-	g.Host = graph.HostInfo{Hostname: "prod-web-01", OS: "Ubuntu 22.04.4 LTS", Docker: "27.3.1", ScannedAt: time.Now().UTC()}
+	g.Host = graph.HostInfo{Hostname: "prod-web-01", OS: "Ubuntu 22.04.4 LTS", Docker: "27.3.1", Addrs: []string{"10.0.1.10"}, ScannedAt: time.Now().UTC()}
 
 	for _, c := range containers {
 		user, restart, status, exit := c.user, c.restart, "running", "0"
@@ -101,6 +106,39 @@ func Graph() *graph.Graph {
 		}
 		g.AddNode(&graph.Node{ID: "vol:" + v, Kind: graph.KindVolume, Name: name, Status: "unused", Attrs: map[string]string{"driver": "local", "full_name": v}})
 	}
-	g.Sort()
+	g.Node("ctr:shop-worker-1").Lists["connects"] = []string{"10.0.1.20:5432"}
+
+	domain := func(name string, tls, plain bool, routes map[string]string, unresolved ...string) {
+		id := "domain:" + name
+		g.AddNode(&graph.Node{ID: id, Kind: graph.KindDomain, Name: name, Status: "nginx",
+			Attrs: map[string]string{"served_by": "shop-nginx-1", "tls": strconv.FormatBool(tls), "plain_http_serves": strconv.FormatBool(plain)},
+			Lists: map[string][]string{"listen": {"80", "443"}, "unresolved": unresolved}})
+		g.Expose(id, 443, true, ":443")
+		for path, to := range routes {
+			g.Node(id).Lists["routes"] = append(g.Node(id).Lists["routes"], path+" -> "+to)
+			g.AddEdge(&graph.Edge{From: id, To: "ctr:" + to, Kind: graph.EdgeRoutes, Label: path})
+		}
+	}
+	domain("shop.example.com", true, false, map[string]string{"/": "shop-web-1"}, "/admin/ -> http://127.0.0.1:9999")
+	domain("www.shop.example.com", false, false, nil)
+	domain("grafana.example.com", false, true, map[string]string{"/": "monitoring-grafana-1"})
+	return g
+}
+
+func db() *graph.Graph {
+	g := graph.New()
+	g.Host = graph.HostInfo{Hostname: "prod-db-01", OS: "Debian 12", Addrs: []string{"10.0.1.20"}, ScannedAt: time.Now().UTC()}
+	for _, p := range []struct{ name, cmd, addr string }{
+		{"postgres", "/usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main", "0.0.0.0:5432"},
+		{"sshd", "sshd: /usr/sbin/sshd -D", "0.0.0.0:22"},
+		{"node_exporter", "/usr/local/bin/node_exporter", "0.0.0.0:9100"},
+	} {
+		id := "proc:" + p.name
+		bind, port, _ := strings.Cut(p.addr, ":")
+		n := g.AddNode(&graph.Node{ID: id, Kind: graph.KindProcess, Name: p.name, Status: "listening", Attrs: map[string]string{"cmdline": p.cmd}})
+		n.Lists["listening"], n.Lists["ports"] = []string{p.addr}, []string{port}
+		portNum, _ := strconv.Atoi(port)
+		g.Expose(id, portNum, bind == "0.0.0.0", p.addr)
+	}
 	return g
 }

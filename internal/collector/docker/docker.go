@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	procnet "github.com/RavaliMeka/whatsrunning/internal/collector/ports"
 	"github.com/RavaliMeka/whatsrunning/internal/graph"
 )
 
@@ -83,6 +84,7 @@ type container struct {
 	State struct {
 		Status   string `json:"Status"`
 		Running  bool   `json:"Running"`
+		Pid      int    `json:"Pid"`
 		ExitCode int    `json:"ExitCode"`
 	} `json:"State"`
 	HostConfig struct {
@@ -104,7 +106,8 @@ type container struct {
 	NetworkSettings struct {
 		Ports    map[string][]binding `json:"Ports"`
 		Networks map[string]struct {
-			Aliases []string `json:"Aliases"`
+			Aliases   []string `json:"Aliases"`
+			IPAddress string   `json:"IPAddress"`
 		} `json:"Networks"`
 	} `json:"NetworkSettings"`
 }
@@ -196,6 +199,7 @@ func addContainer(g *graph.Graph, ct *container, used map[string]bool) *ref {
 	sort.Strings(keys)
 	for _, k := range keys {
 		cport, _, _ := strings.Cut(k, "/")
+		n.Lists["ports"] = append(n.Lists["ports"], cport)
 		for _, b := range ports[k] {
 			hp, _ := strconv.Atoi(b.HostPort)
 			public := isPublic(b.HostIP)
@@ -236,8 +240,15 @@ func addContainer(g *graph.Graph, ct *container, used map[string]bool) *ref {
 	for nw, s := range ct.NetworkSettings.Networks {
 		n.Lists["networks"] = append(n.Lists["networks"], nw)
 		hostnames = append(hostnames, s.Aliases...)
+		if s.IPAddress != "" {
+			n.Lists["ips"] = append(n.Lists["ips"], s.IPAddress)
+		}
 	}
 	sort.Strings(n.Lists["networks"])
+	if ct.State.Running && ct.State.Pid > 0 && ct.HostConfig.NetworkMode != "host" {
+		// Each container has its own network namespace, visible through any of its processes.
+		n.Lists["connects"] = procnet.Outbound(fmt.Sprintf("/proc/%d/net", ct.State.Pid))
+	}
 	slices.Sort(hostnames)
 	n.Lists["hostnames"] = slices.DeleteFunc(slices.Compact(hostnames), func(h string) bool { return len(h) < 2 || hexID.MatchString(h) })
 

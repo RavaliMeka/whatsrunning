@@ -2,7 +2,9 @@
 package graph
 
 import (
+	"net"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -13,6 +15,7 @@ const (
 	KindContainer Kind = "container"
 	KindProcess   Kind = "process"
 	KindVolume    Kind = "volume"
+	KindDomain    Kind = "domain"
 )
 
 type EdgeKind string
@@ -21,6 +24,7 @@ const (
 	EdgeExposes EdgeKind = "exposes"
 	EdgeMounts  EdgeKind = "mounts"
 	EdgeTalksTo EdgeKind = "talks-to"
+	EdgeRoutes  EdgeKind = "routes" // domain -> service, from reverse proxy config
 )
 
 type Node struct {
@@ -28,6 +32,7 @@ type Node struct {
 	Kind   Kind                `json:"kind"`
 	Name   string              `json:"name"`
 	Group  string              `json:"group,omitempty"`
+	Server string              `json:"server,omitempty"`
 	Status string              `json:"status,omitempty"`
 	Attrs  map[string]string   `json:"attrs,omitempty"`
 	Lists  map[string][]string `json:"lists,omitempty"`
@@ -46,14 +51,16 @@ type HostInfo struct {
 	Hostname  string    `json:"hostname"`
 	OS        string    `json:"os,omitempty"`
 	Docker    string    `json:"docker,omitempty"`
+	Addrs     []string  `json:"addrs,omitempty"`
 	ScannedAt time.Time `json:"scannedAt"`
 }
 
 type Graph struct {
-	Host     HostInfo `json:"host"`
-	Nodes    []*Node  `json:"nodes"`
-	Edges    []*Edge  `json:"edges"`
-	Warnings []string `json:"warnings,omitempty"`
+	Host     HostInfo   `json:"host"`
+	Servers  []HostInfo `json:"servers,omitempty"`
+	Nodes    []*Node    `json:"nodes"`
+	Edges    []*Edge    `json:"edges"`
+	Warnings []string   `json:"warnings,omitempty"`
 	index    map[string]*Node
 	edges    map[Edge]bool
 }
@@ -163,4 +170,95 @@ func (g *Graph) Sort() {
 		}
 		return a.To < b.To
 	})
+}
+
+// Namespaced copies g with every ID scoped to server, so graphs from several
+// servers can be merged. The internet node stays shared.
+func (g *Graph) Namespaced(server string) *Graph {
+	id := func(s string) string {
+		if s == "internet" {
+			return s
+		}
+		return server + "::" + s
+	}
+	out := New()
+	for _, n := range g.Nodes {
+		c := *n
+		c.ID, c.Server = id(n.ID), server
+		if n.ID == "host" {
+			c.Name = server + " (localhost only)"
+		}
+		out.AddNode(&c)
+	}
+	for _, e := range g.Edges {
+		c := *e
+		c.From, c.To = id(e.From), id(e.To)
+		out.AddEdge(&c)
+	}
+	for _, w := range g.Warnings {
+		out.Warnings = append(out.Warnings, server+": "+w)
+	}
+	out.Servers = []HostInfo{g.Host}
+	return out
+}
+
+// LinkConnections turns observed outbound connections ("connects") into
+// talks-to edges by matching each peer address to the node listening there:
+// a container by its own IP and port, or anything published on a server address.
+func (g *Graph) LinkConnections() {
+	servers := g.Servers
+	if len(servers) == 0 {
+		servers = []HostInfo{g.Host}
+	}
+	addrsOf := map[string][]string{}
+	for _, h := range servers {
+		addrsOf[h.Hostname] = h.Addrs
+	}
+	at := map[string]string{}
+	for _, e := range g.Edges {
+		n := g.Node(e.To)
+		if e.Kind != EdgeExposes || n == nil || e.Port == 0 {
+			continue
+		}
+		server := n.Server
+		if server == "" {
+			server = g.Host.Hostname
+		}
+		for _, a := range addrsOf[server] {
+			if k := net.JoinHostPort(a, strconv.Itoa(e.Port)); at[k] == "" {
+				at[k] = n.ID
+			}
+		}
+	}
+	// Container IPs are private to their server's Docker networks, so scope them.
+	for _, n := range g.Nodes {
+		for _, ip := range n.Lists["ips"] {
+			for _, p := range n.Lists["ports"] {
+				at[n.Server+"|"+net.JoinHostPort(ip, p)] = n.ID
+			}
+		}
+	}
+	for _, n := range g.Nodes {
+		for _, peer := range n.Lists["connects"] {
+			to := at[n.Server+"|"+peer]
+			if to == "" {
+				to = at[peer]
+			}
+			if to != "" && to != n.ID {
+				g.observe(n.ID, to)
+			}
+		}
+	}
+}
+
+// observe records a seen connection, replacing any link that was only inferred.
+func (g *Graph) observe(from, to string) {
+	for _, e := range g.Edges {
+		if e.Kind == EdgeTalksTo && e.From == from && e.To == to && e.Label != "observed" {
+			delete(g.edges, *e)
+			e.Label = "observed"
+			g.edges[*e] = true
+		}
+	}
+	g.AddEdge(&Edge{From: from, To: to, Kind: EdgeTalksTo, Label: "observed"})
 }

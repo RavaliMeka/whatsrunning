@@ -9,6 +9,7 @@ go vet ./... && go test ./...                  # must pass before every commit
 go build -o bin/whatsrunning ./cmd/whatsrunning
 ./bin/whatsrunning demo -o docs/index.html    # regenerate the live demo after UI changes
 sudo ./bin/whatsrunning -v                    # scan this machine
+sudo testdata/e2e/run.sh bin/whatsrunning     # end-to-end: real nginx stack + throwaway sshd
 ```
 
 ## Layout
@@ -16,7 +17,9 @@ sudo ./bin/whatsrunning -v                    # scan this machine
 - `cmd/whatsrunning`: flags, output files, exit codes
 - `internal/graph`: the shared model (nodes, edges); everything else reads or writes it
 - `internal/collector/{docker,ports}`: data sources implementing `collector.Collector`
-- `internal/scan`: runs collectors and merges results
+- `internal/scan`: runs collectors, nginx and link resolution; `Combine` merges servers
+- `internal/nginx`: config parser and domain/route enrichment
+- `internal/remote`: ssh scanning through the system ssh client
 - `internal/rules`: findings; one check per concern, each with a tested positive and negative case
 - `internal/render`: terminal, JSON, and `map.html` (embedded; vanilla JS, no CDN)
 - `internal/demo`: sample server used by `whatsrunning demo` and `docs/index.html`

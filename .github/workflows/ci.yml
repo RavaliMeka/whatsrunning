@@ -16,3 +16,16 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - run: go build -o bin/whatsrunning ./cmd/whatsrunning
+      - run: command -v sshd || sudo apt-get install -y -qq openssh-server
+      - run: sudo testdata/e2e/run.sh bin/whatsrunning

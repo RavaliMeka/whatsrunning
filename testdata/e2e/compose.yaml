@@ -1,0 +1,28 @@
+# End-to-end test server: nginx in front of an app, a database and a worker,
+# with mistakes planted for whatsrunning to find (see e2e.sh for expectations).
+name: e2e
+services:
+  proxy:
+    image: nginx:alpine
+    ports: ["8088:80"]
+    volumes: ["./nginx:/etc/nginx/conf.d:ro"]
+    depends_on: [web]
+    restart: unless-stopped
+  web:
+    image: nginx:alpine
+    ports: ["8081:80"]          # planted: reachable directly, bypassing the proxy
+    restart: unless-stopped
+  db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_PASSWORD: e2e-secret }
+    ports: ["5432:5432"]        # planted: database open to the world
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    restart: unless-stopped
+  worker:
+    image: postgres:16-alpine
+    environment: { PGPASSWORD: e2e-secret }
+    # Holds a connection open so the db link is observed, not inferred.
+    entrypoint: ["sh", "-c", "until psql -h db -U postgres -c 'select pg_sleep(3600)'; do sleep 1; done"]
+    depends_on: [db]
+    restart: unless-stopped
+volumes: { pgdata: {} }
