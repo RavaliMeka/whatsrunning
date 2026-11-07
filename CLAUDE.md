@@ -29,4 +29,4 @@ sudo ./bin/whatsrunning -v                    # scan this machine
 - Do not load anything external in `map.html`; the CSP pins the script by hash and blocks network access.
 - Report files are written through `writeFile` (0600, no symlinks).
 - Comments explain why, not what. Keep functions small; delete dead code.
-- Work on the `komal_grinding` branch. Commits are authored by RavaliMeka with no co-author trailers or tool attribution.
+- Work on `main`. Commits are authored by RavaliMeka with no co-author trailers or tool attribution.
