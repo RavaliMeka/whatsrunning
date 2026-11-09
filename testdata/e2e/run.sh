@@ -2,9 +2,10 @@
 # End-to-end test. Starts the compose stack and a throwaway sshd bound to
 # localhost, scans this machine directly and over ssh, and checks that the
 # planted problems are found. Needs root, Docker, OpenSSH and jq.
-# Usage: sudo testdata/e2e/run.sh path/to/whatsrunning
+# Usage: sudo testdata/e2e/run.sh path/to/whatsrunning [dir-to-keep-the-maps-in]
 set -eu
 bin=$(realpath "$1")
+keep=${2:+$(realpath -m "$2")}
 cd "$(dirname "$0")"
 tmp=$(mktemp -d)
 chmod 700 "$tmp"
@@ -55,7 +56,7 @@ chmod 755 "$tmp/bin/ssh"
 "$(command -v sshd || echo /usr/sbin/sshd)" -f "$tmp/sshd_config"
 
 "$bin" -o "$tmp/local.html" -json "$tmp/local.json" >/dev/null
-PATH="$tmp/bin:$PATH" "$bin" -ssh e2e-server -local -o - -json "$tmp/multi.json" >/dev/null
+PATH="$tmp/bin:$PATH" "$bin" -ssh e2e-server -local -o "$tmp/multi.html" -json "$tmp/multi.json" >/dev/null
 
 fail=0
 check() { # description, jq filter, file
@@ -73,5 +74,11 @@ check "observed worker -> db link"     '.graph.edges | any(.kind == "talks-to" a
 check "ssh scan adds a second server"  '.graph.servers | length == 2' "$M"
 check "ssh server found the database"  "$(finding exposed-datastore e2e-server::ctr:e2e-db-1)" "$M"
 if ls -A "$(getent passwd root | cut -d: -f6)" | grep -q '^\.whatsrunning\.'; then echo "FAIL  temporary binary left on the server"; fail=1; else echo "ok    temporary binary removed"; fi
-if grep -q e2e-secret "$L" "$M" "$tmp/local.html"; then echo "FAIL  a secret leaked into a report"; fail=1; else echo "ok    no secrets in reports"; fi
+if grep -q e2e-secret "$L" "$M" "$tmp/local.html" "$tmp/multi.html"; then echo "FAIL  a secret leaked into a report"; fail=1; else echo "ok    no secrets in reports"; fi
+if [ -n "$keep" ]; then
+	mkdir -p "$keep"
+	cp "$tmp/local.html" "$keep/one-server.html"
+	cp "$tmp/multi.html" "$keep/two-servers-over-ssh.html"
+	chmod 644 "$keep"/*.html
+fi
 exit $fail

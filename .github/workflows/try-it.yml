@@ -1,0 +1,39 @@
+# One-click trial: Actions -> "Try it" -> Run workflow. Starts the test lab on a
+# fresh machine, scans it locally and over ssh, and attaches the maps.
+name: Try it
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  try:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - run: go build -o bin/whatsrunning ./cmd/whatsrunning
+      - run: command -v sshd || sudo apt-get install -y -qq openssh-server
+      - name: Scan the test lab
+        run: |
+          set -o pipefail
+          {
+            echo "## whatsrunning test lab"
+            echo "Download **whatsrunning-maps** below, unzip it and open the HTML files in a browser."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          sudo testdata/e2e/run.sh bin/whatsrunning maps 2>&1 | grep -E '^(ok|FAIL) ' | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: whatsrunning-maps
+          path: maps/
+          retention-days: 14
+          if-no-files-found: warn

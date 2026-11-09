@@ -73,6 +73,8 @@ go install github.com/RavaliMeka/whatsrunning/cmd/whatsrunning@latest
 
 `whatsrunning demo` maps a sample server, if you want to look before scanning your own.
 
+No server at hand? Fork the repo, open **Actions → Try it → Run workflow**, and download the maps of a test lab scanned on a fresh GitHub machine.
+
 ## Usage
 
 ```
